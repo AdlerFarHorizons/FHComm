@@ -31,7 +31,6 @@ const int CMDLEN = TERMLEN;
 const int PKTLEN = 200;
 
 // Hardware pin assignements
-const int teensyLedPin = 13;
 const int xtRssiFiltPin = A9;
 const int battMonPin = A8;
 const int vinMonPin = A7;
@@ -73,9 +72,9 @@ const int eeaddrLastGPSTimeSync = eeaddrStart; // time_t
  * the Port B rate is set at 9600 Baud and Dynamics Mode is set to "Air".
  * 
  * A configuration string is sent to set up automatic sentence output on Port B for
- * one ZDA sentence every two seconds for time synchronization:
+ * one ZDA sentence every three seconds to keep the Teensy RTC synchronized:
  * 
- *  ZDA:Provides nothing until first f ix, then provides full date
+ *  ZDA:Provides nothing until first fix, then provides full date
  *      based on internal clock until reset. Clock synced to true
  *      UTC at prior PPS output sometime after a fully valid 2D fix.
  *      
@@ -93,12 +92,14 @@ const String gpsTFReqStr = "$PTNLQTF*45\r\n";
  * valid addresses only.
  */
 
-const String xtConfStr = "ATSM1,BR0,RR2,CD4,PL2"; // "ATSM1,BR0,RR2,CD4";
+// To run at reduced TX power level change "PL4" to "PLx", where
+//   x = 0, 1, 2, 3, 4 --> 1, 10, 100, 500, 1000 mW
+const String xtConfStr = "ATSM1,BR0,RR2,CD4,PL4";
  
 // GPS Variables
-char gps[GPSLEN], gpsBuf[GPSLEN], gpsZDA[GPSLEN], gpsTF[GPSLEN]; 
+char gps[GPSLEN], gpsZDA[GPSLEN], gpsTF[GPSLEN]; 
 int gpsIndex = 0;
-boolean gpsRdy, gpsZDAFlg, gpsTFFlg, gpsChkFlg, gpsErrFlg, gpsFixFlg;
+boolean gpsRdy, gpsZDAFlg, gpsTFFlg, gpsChkFlg, gpsErrFlg, gpsFixReqdFlg;
 boolean gpsPosValid, gpsMsgFlg, gpsTimeFlg, gpsTimeValid;
 byte gpsChk;
 float gpsLat, gpsLon, gpsAlt, gpsVe, gpsVn, gpsVu;
@@ -110,16 +111,17 @@ char rx[PKTLEN], rxBuf[PKTLEN];
 int rxIndex;
 boolean rxRdy, rxPktFlg, rxChkFlg, rxErrFlg, rxBufCurrent, rxValid;
 boolean rxFlg, rxNewFlg;
+volatile boolean rssiFlg;
 volatile int rssiState;
 elapsedMicros rssiTime;
 volatile long rssiMeasTime, rssiEndTime;
 float rssi;
+int numb = 0; // Payload transmit (sync) packet sequence mumber
 
-// Tranmsit variables
+// Transit variables
 char tx[PKTLEN];
 int txIndex = 0;
 boolean txFlg, txPktFlg;
-int numb = 0;
 int numbLastRx = -1;
 
 // File system variables
@@ -132,7 +134,6 @@ float temperature, vBatt, vIn;
 
 void setup(){
 
-  pinMode( teensyLedPin, OUTPUT );
   pinMode( xtRxLedPin, INPUT );
   pinMode( xtCmdPin, OUTPUT );
   pinMode( xtSleepPin, OUTPUT );
@@ -224,31 +225,16 @@ void setup(){
 }
 
 void loop(){
-  if ( gpsMsgFlg ) updateGPSMsg();
   if ( gpsZDAFlg ) procZDAMsg();
   if ( gpsTFFlg ) procTFMsg();
-  if ( gpsFixFlg ) {
-    gpsSendCmd( gpsTFReqStr );
-    gpsFixFlg = false;
-  }
+  if ( gpsMsgFlg ) updateGPSMsg();
+  if ( gpsFixReqdFlg ) requestGPSFix();
+  if ( txFlg ) sendTxPkt();
+  if ( txPktFlg ) makeTxPkt();
+  if ( rxPktFlg ) procRxPkt();
+  if ( rssiFlg ) procRssi();
   if ( Serial1.available() ) getGPSByte();
   if ( Serial2.available() ) getRXByte();
-  if ( txPktFlg ) makeTxPkt();
-  if ( txFlg ) {
-    sendData();
-    rssi = 0;
-    numb++;
-    txFlg = false;
-  }
-  if ( rxPktFlg ) procRxPkt();
-  if ( rssiState == 1 ) digitalWrite( teensyLedPin, HIGH );
-  if ( rssiState == 2 ) digitalWrite( teensyLedPin, LOW );
-  if ( rssiState == 3 ) digitalWrite( teensyLedPin, HIGH );
-  if ( rssiState == 4 ) {
-    digitalWrite( teensyLedPin, LOW );
-    rssiState = 0;
-    rssi = calcRssi();
-  }
 }
 
 void getRXByte() {
@@ -320,9 +306,6 @@ void updateGPSMsg() {
     gpsTFFlg = true;
   }
 
-  for ( int i = 0 ; i < GPSLEN ; i++ ) {
-      gpsBuf[i] = gps[i];
-  }
   if ( DEBUG ) Serial.println( "GPS Buffer updated." );
   gpsMsgFlg = false;
   if ( DEBUG ) {
@@ -374,7 +357,12 @@ void procTFMsg() {
     gpsVu = getField( gpsTF, 13, ',' ).toFloat();
   }
   gpsTFFlg = false;
-  txPktFlg = true;
+  txPktFlg = true; // Queue up TX packet preparation
+}
+
+void requestGPSFix() {
+  gpsSendCmd( gpsTFReqStr );
+  gpsFixReqdFlg = false;
 }
 
 void makeTxPkt() {
@@ -395,16 +383,23 @@ void makeTxPkt() {
     String( gpsVe, 3 ).trim() + ',' +
     String( gpsVn, 3 ).trim() + ',' +
     String( gpsVu, 3 ).trim();
-    byte chkSum = 0;
-    int txLen = txPktStr.length();
-    for ( int i = 0 ; i < txLen ; i++ ) {
-      chkSum ^=(byte)txPktStr.charAt(i);
-    }
-    String chkStr = String( chkSum, HEX );
-    if ( chkStr.length() == 1 ) chkStr = '0' + chkStr;
-    txPktStr = PKTPREFIX + txPktStr + PKTSUFFIX + chkStr;
-    txPktStr.toCharArray( tx, PKTLEN );
-    txPktFlg = false;
+  byte chkSum = 0;
+  int txLen = txPktStr.length();
+  for ( int i = 0 ; i < txLen ; i++ ) {
+    chkSum ^=(byte)txPktStr.charAt(i);
+  }
+  String chkStr = String( chkSum, HEX );
+  if ( chkStr.length() == 1 ) chkStr = '0' + chkStr;
+  txPktStr = PKTPREFIX + txPktStr + PKTSUFFIX + chkStr;
+  txPktStr.toCharArray( tx, PKTLEN );
+  txPktFlg = false;
+}
+
+void sendTxPkt() {
+  sendData();
+  rssi = 0;
+  numb++;
+  txFlg = false;
 }
 
 void procRxPkt() {
@@ -417,17 +412,23 @@ void procRxPkt() {
     logFile.println( rx );
     logFile.flush();
   }
+  // ??? Replace with call to rssiStart with rssiState = 0 ???
   rxPktFlg = false;
-  //rssi = 0; // Erase any prior reading
   rssiState = 1; // Arm RSSI measurement
   attachInterrupt( xtRssiPwmPin, rssiStart, RISING );
 }
 
+void procRssi() {
+  rssiState = 0;
+  rssiFlg = false;
+  rssi = calcRssi();
+}
+  
 void rssiStart() {
   detachInterrupt( xtRssiPwmPin );
   if ( rssiState == 1 ) {
     rssiTime = 0; //rssiStartTime = micros();
-    rssiState++;
+    rssiState = 2;
     attachInterrupt( xtRssiPwmPin, rssiMeas, FALLING );
   } else {
     rssiState = 1;
@@ -444,8 +445,9 @@ void rssiMeas() {
       rssiMeasTime = 0;
       rssiEndTime = 8000;
       rssiState = 4;
+      rssiFlg = true;
     } else {
-      rssiState++;
+      rssiState = 3;
       attachInterrupt( xtRssiPwmPin, rssiStop, RISING );
     }
   } else {
@@ -458,7 +460,8 @@ void rssiStop() {
   detachInterrupt( xtRssiPwmPin );
   if ( rssiState == 3 ){
     rssiEndTime = rssiTime;
-    rssiState++;
+    rssiState = 4;
+    rssiFlg = true;
   } else {
     rssiState = 1;
     attachInterrupt( xtRssiPwmPin, rssiStart, RISING );
@@ -485,10 +488,10 @@ void sendData() {
   attachInterrupt( xtNTxPin, measV, FALLING );
   int i = 0;
   while( tx[i] != 0 ) {
-    printAndSendChar( tx[i] );
+    Serial2.write( tx[i] );
     i++;
   }
-  printAndSendChar( 10 );
+  Serial2.write( 10 );
 
   digitalClockDisplay( now() );Serial.println( " Sending..." );
   Serial.println( tx );
@@ -505,24 +508,12 @@ void measV() {
   vIn = analogRead( vinMonPin ) * vinMonToVolts;
 }
 
-void printAndSendString( String whatToSend ){ //sends message to both terminal & rf module
-  Serial2.print( whatToSend ); // RF module
-  //Serial.print( whatToSend ); // Terminal
-  //if ( isLogging ) logFile.print( whatToSend ); // Log file
-}
-
-void printAndSendChar( char whatToSend ){ //sends message to both terminal & rf module
-  Serial2.write( whatToSend ); // RF module
-  //Serial.write( whatToSend ); // Terminal
-  //if ( isLogging ) logFile.write( whatToSend ); // Log file
-}
-
 time_t getTeensy3Time() {
   return Teensy3Clock.get();
 }
 
 void digitalClockDisplay(time_t t) {
-  // digital clock display of the time
+  // digital clock display of a time_t value
   int hr = hour(t);
   if ( hr < 10 ) Serial.print( '0' );
   Serial.print(hr);
@@ -541,20 +532,6 @@ void printDigits(int digits){
   Serial.print(":");
   if(digits < 10) Serial.print('0');
   Serial.print(digits);
-}
-
-String timeToString( time_t t ) {
-  int hr = hour(t);
-  if ( hr < 10 ) Serial.print( '0' );
-  Serial.print(hr);
-  printDigits(minute(t));
-  printDigits(second(t));
-  Serial.print(" ");
-  Serial.print(day(t));
-  Serial.print(" ");
-  Serial.print(month(t));
-  Serial.print(" ");
-  Serial.print(year(t)); 
 }
 
 String timeToFilename( time_t t ) {
@@ -610,10 +587,11 @@ void ppsSvc() {
     txFlg = true;
     if ( DEBUG ) Serial.println( " Transmitting..." );
   }
+  
   if ( ppsCnt == TXINTERVAL - 2 ) {
     if ( DEBUG ) Serial.println( "Waking XTend..." );
     digitalWrite( xtSleepPin, LOW );
-    gpsFixFlg = true;
+    gpsFixReqdFlg = true;
     if ( DEBUG ) Serial.println( "Getting GPS fix..." );
   }
   if ( ppsCnt == 0 ) {
@@ -633,7 +611,7 @@ String checkStr( String str ) {
   char buf[80]; // Max length of NMEA excl. '$',CR,LF = 79, + null
   str.toCharArray(buf, 80);
   byte check = 0x00;
-  for ( int i = 0 ; i < str.length() ; i++ ) {
+  for ( unsigned int i = 0 ; i < str.length() ; i++ ) {
     check ^= (byte)buf[i];
   }
   String chkStr = String( check, HEX );
