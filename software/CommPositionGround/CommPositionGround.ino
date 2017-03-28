@@ -7,7 +7,34 @@
  */
 
 /*
- * Serial:  External Serial Monitor through USB
+ * COMMANDS;
+ * 
+ * Commands are entered via the terminal as (with CR and/or LF
+ * terminator required):
+ * 
+ * @[R|L] <arg1> <arg2> ... <argN>
+ * 
+ * Where R or L signify a Remote or Local command.
+ * 
+ * Local commands are for interaction with the local unit, while
+ * Remote commands are sent in the next TX packet.
+ * 
+ * Remote Commands:
+ * 
+ * A field that can accomodate multiple remote command strings is
+ * appended to the telemetry data string with a ":" prefix separator.
+ * The individual commands + arguments are simply appended
+ * with the '@' serving as a delimiter. If there are no commands,
+ * the field is blank, but the ':' delimiter is still present.
+ * 
+ * NOTE:
+ *    Currently only a single command per packet is allowed.
+ *    Any new commands are ignored until the packet is sent.
+ * 
+ */
+
+/*
+ * Serial:  External Serial Interface through USB
  * Serial1: GPS
  * Serial2: RF data IN/OUT
  */
@@ -24,9 +51,14 @@ const String SOURCEID = "GS0";
 const String PKTSUFFIX = "*";
 const int TXINTERVAL = 10; // Seconds. Must match payload setting
 
+// Transceiver configuration constants
+// This string constant sets the TX power, where
+//   xtPwr = "0", "1", "2", "3", "4" --> 1, 10, 100, 500, 1000 mW
+const String xtPwr = "0";
+
 // Array Sizes
 const int GPSLEN = 100; //max length of GPS sentence
-const int TERMLEN = 100;
+const int TERMLEN = 100; // Terminal input line length
 const int CMDLEN = TERMLEN;
 const int PKTLEN = 200;
 
@@ -67,7 +99,7 @@ const int eeaddrLastGPSTimeSync = eeaddrStart; // time_t
 //const int eeaddrXxxx = eeaddrLastGPSTimeSync + sizeof( time_t );
 
 
- /*
+/*
  * Copernicus II power up configuration is assumed to be set to defaults except
  * the Port B rate is set at 9600 Baud and Dynamics Mode is set to "Air".
  * 
@@ -93,12 +125,10 @@ const String gpsTFReqStr = "$PTNLQTF*45\r\n";
 
 /*
  * Digi 9XTend configured for Pin Sleep mode, 9600 Baud RF rate, 2 retries, RX LED on
- * valid addresses only.
+ * valid addresses only, TX Power per constant defined above:
  */
 
-// To run at reduced TX power level change "PL4" to "PLx", where
-//   x = 0, 1, 2, 3, 4 --> 1, 10, 100, 500, 1000 mW
-const String xtConfStr = "ATSM1,BR0,RR2,CD4,PL4";
+const String xtConfStr = "ATSM1,BR0,RR2,CD4,PL" + xtPwr;
 
 // GPS variables
 char gps[GPSLEN], gpsZDA[GPSLEN], gpsTF[GPSLEN]; 
@@ -131,6 +161,23 @@ boolean txFlg, txPktFlg;
 File logFile;
 char logFileName[13];
 boolean isLogging;
+boolean outputFlg; // False suppresses debug & status output when
+                   //   interactive local command is active.
+
+char cmd[CMDLEN]; // Command buffer includes arguments
+int cmdIndex; // Index for command string array, cmdStrings
+String cmdStr; // Current full command string (command code + args)
+boolean cmdInFlg; // A command is being entered;
+boolean cmdFlg; // A command has been entered and is pending
+boolean remCmdFlg; // Pending command is remote if true, local if false
+char cmdChar = '@';
+// Command code format: L or R for Local or remote, followed by 2-char command
+const int NUMCMDCODES = 2; // Number of command codes
+const int CMDCODELEN = 4; // Includes extra char for null terminator
+
+char cmdStrings[NUMCMDCODES][CMDCODELEN] =
+  { "LFT", // Local file transfer
+    "RVS" }; // Switch platform video feed
 
 // Sensor variables
 float temperature, vBatt, vIn;
@@ -157,6 +204,9 @@ void setup(){
   rxPktFlg = false;
   rxIndex = 0;
   rssiState = 0;
+  outputFlg = true;
+  cmdIndex = 0;
+  cmdFlg = false;
   
   delay( 5000 ); //Wait for GPS to power up.
   Serial.begin(9600);
@@ -170,7 +220,8 @@ void setup(){
   while( !Serial1 );
   while( !Serial2 );
 
-  Serial.println( "Ground Station Unit - TEST\n" );
+  Serial.println( "Ground Station Unit" );
+  Serial.println( "TX Power Setting " + xtPwr + "\n" );
 
   // Configure XTend
   xtConfig( xtConfStr );
@@ -228,6 +279,7 @@ void setup(){
 }
 
 void loop(){
+  if ( cmdFlg ) procCmd();
   if ( gpsZDAFlg ) procZDAMsg();
   if ( gpsTFFlg ) procTFMsg();
   if ( gpsMsgFlg ) updateGPSMsg();
@@ -238,6 +290,69 @@ void loop(){
   if ( rssiFlg ) procRssi();
   if ( Serial1.available() ) getGPSByte();
   if ( Serial2.available() ) getRXByte();
+  if ( Serial.available() ) getInputByte();
+}
+
+void getInputByte() {
+  char inChar = Serial.read();
+  if ( cmdInFlg && !cmdFlg ) {
+    if ( inChar == 10 || inChar == 13 ) {
+      // End of command string.
+      // Save, set command flag, reset input system
+      cmd[cmdIndex] = 0;
+      cmdStr = (String)cmd;
+      //cmdIndex = 0; // Reset command input buffer
+      cmdInFlg = false;
+      parseCmd();
+    } else {
+      cmd[cmdIndex] = inChar;
+      cmdIndex++;
+    }    
+  }
+  // Reset and arm input system if no command pending and
+  // command char received
+  if ( !cmdFlg && ( inChar == cmdChar ) ) {
+    cmdInFlg = true;
+    cmd[0] = inChar;
+    cmdIndex = 1;
+  }
+}
+
+void parseCmd() {
+  // NOTE: getField ignores 1st (command) char
+  String tmpCmd = getField( cmdStr, 0, ' ' );
+  if ( tmpCmd.length() == 3 ) {
+    // Extract 3-char command string without arguments
+    int tmpIndex = -1;
+    // Get command index
+    for ( int i = 0 ; i < NUMCMDCODES ; i++ ) {
+      if ( (String)cmdStrings[i] == tmpCmd ) tmpIndex = i;
+    }
+
+    if ( tmpIndex < 0 ) {
+      Serial.println( "\n'" + tmpCmd + "' is not a valid command\n" );
+      cmdStr = "";
+    } else {
+      // Valid command received.
+      Serial.println( "\n'" + tmpCmd + "' Command entered\n" );
+      cmdFlg = true;
+    }    
+  } else {    
+    Serial.println( "\n'" + tmpCmd + "' is not a valid command\n" );
+    cmdStr = "";
+  }
+}
+
+void procCmd() {
+  if ( cmdStr.charAt( 1 ) == 'L' ) {
+    Serial.println( "\nProcessing local command '" + cmdStr + "'\n");
+    remCmdFlg = false;
+    cmdFlg = false;
+    cmdStr = "";
+  }
+  if ( cmdStr.charAt( 1 ) == 'R' ) {
+    remCmdFlg = true;
+  }
 }
 
 void getRXByte() {
@@ -245,14 +360,14 @@ void getRXByte() {
   //    No checksum check
   char c = Serial2.read();
   if ( c == '$' || rxRdy ) {
-    if ( DEBUG ) Serial.println( "\nRX msg started..." );
+    if ( outputFlg && DEBUG ) Serial.println( "\nRX msg started..." );
     rxRdy = false;
     rxIndex = 0;
   } else {
     if ( c == '*' && !rxRdy ) { // End of in-process RX msg
       rxRdy = true;
       rxPktFlg = true;
-      if ( DEBUG ) Serial.println( "\nRX msg ended." );
+      if ( outputFlg && DEBUG ) Serial.println( "\nRX msg ended." );
     } 
   }
 
@@ -269,11 +384,11 @@ void getGPSByte() {
     gpsIndex = 0;
     gpsRdy = false;
     gpsChk = 0;
-    if ( DEBUG ) Serial.println( "\nGPS msg started..." );
+    if ( outputFlg && DEBUG ) Serial.println( "\nGPS msg started..." );
   }
   if ( c == '*' ) { // '*' indicates end of GPS sentence
     gpsChkFlg = true;
-    if ( DEBUG ) Serial.println( gps );
+    if ( outputFlg && DEBUG ) Serial.println( gps );
   }
   if ( !gpsRdy ) {
     if ( gpsChkFlg ) {
@@ -291,7 +406,7 @@ void getGPSByte() {
 }
 
 void updateGPSMsg() {
-  if ( DEBUG ) Serial.println( "GPS msg rcvd" );
+  if ( outputFlg && DEBUG ) Serial.println( "GPS msg rcvd" );
   String str = String( gps );
   int i;
   
@@ -309,16 +424,16 @@ void updateGPSMsg() {
     gpsTFFlg = true;
   }
 
-  if ( DEBUG ) Serial.println( "GPS Buffer updated." );
+  if ( outputFlg && DEBUG ) Serial.println( "GPS Buffer updated." );
   gpsMsgFlg = false;
-  if ( DEBUG ) {
+  if ( outputFlg && DEBUG ) {
     Serial.print( "GPS Flags:" );Serial.print( gpsTFFlg );
     Serial.println( gpsZDAFlg );
   }
 }
 
 void procZDAMsg() {
-  if ( DEBUG ) Serial.println( gpsZDA );
+  if ( outputFlg && DEBUG ) Serial.println( gpsZDA );
   String utc = getField( gpsZDA, 1, ',' );
   if ( utc.length() > 0 ) {
     gpsHr = utc.substring( 0,2 ).toInt();
@@ -338,7 +453,7 @@ void procTFMsg() {
                  getField( gpsTF, 5, ',' ).toInt() >= 2;
   // Need 3D position fix for proper pointing.
   gpsPosValid = getField( gpsTF, 5, ',' ) == '3';
-  if ( DEBUG ) {
+  if ( outputFlg && DEBUG ) {
     Serial.print( "gpsPosValid:" );Serial.println( gpsPosValid );
     Serial.print( "gpsTimeValid:" );Serial.println( gpsTimeValid );
   }
@@ -384,7 +499,12 @@ void makeTxPkt() {
     String( gpsAlt ) + ',' +
     String( gpsVe, 3 ).trim() + ',' +
     String( gpsVn, 3 ).trim() + ',' +
-    String( gpsVu, 3 ).trim();
+    String( gpsVu, 3 ).trim() + ':';
+  if ( cmdFlg && remCmdFlg ) {
+    txPktStr += cmdStr;
+    cmdFlg = false;
+    cmdStr = "";
+  }
   byte chkSum = 0;
   int txLen = txPktStr.length();
   for ( int i = 0 ; i < txLen ; i++ ) {
@@ -411,9 +531,12 @@ void procRxPkt() {
   ppsCnt = 0;
   // If no GPS fix for either payload or ground, will be no more than 1 sec early.
   // If GPS acquired in both, it will be in precise sync with payload.
-  
-  digitalClockDisplay( now() );Serial.println( " Received..." );  
-  Serial.println( rx );
+
+  if ( outputFlg ) {
+    digitalClockDisplay( now() );
+    Serial.println( " Received..." );  
+    Serial.println( rx );
+  }
   if ( isLogging ) {
     logFile.print( " RX:" );
     logFile.println( rx );
@@ -503,8 +626,11 @@ void sendData() {
   }
   Serial2.write( 10 );
 
-  digitalClockDisplay( now() );Serial.println( " Sending..." );
-  Serial.println( tx );
+  if ( outputFlg ) {
+    digitalClockDisplay( now() );
+    Serial.println( " Sending..." );
+    Serial.println( tx );
+  }
   if ( isLogging ) {
     logFile.print( " TX:" );
     logFile.println( tx );
@@ -563,12 +689,12 @@ void gpsSendCmd( String cmd ) {
 
 void ppsSvc() {
   long tmpMicros;
-  if ( DEBUG ) {
+  if ( outputFlg && DEBUG ) {
     tmpMicros = micros();
   }
   
   // Set clock(s) to UTC time if a valid fix came in since the last PPS
-  if ( DEBUG ) digitalClockDisplay( now() );
+  if ( outputFlg && DEBUG ) digitalClockDisplay( now() );
   if ( gpsTimeValid && gpsTimeFlg ) {
     time_t oldTime = getTeensy3Time();
     setTime( gpsHr,gpsMin,gpsSec,gpsDay,gpsMon,gpsYr ); // "Library" time    
@@ -580,7 +706,7 @@ void ppsSvc() {
     if ( ( abs( oldTime - newTime ) >= 1 || 
          ( newTime - temp ) >= maxTimeSyncAge ) ) {
       EEPROM.put( eeaddrLastGPSTimeSync, newTime );
-      if ( DEBUG ) {
+      if ( outputFlg && DEBUG ) {
         Serial.print( "Time Corrected:" );      
       }
     }
@@ -595,11 +721,11 @@ void ppsSvc() {
   
   if ( ppsCnt == TXINTERVAL - 2 ) {
     gpsFixReqdFlg = true;
-    if ( DEBUG ) Serial.println( "Getting GPS fix..." );
+    if ( outputFlg && DEBUG ) Serial.println( "Getting GPS fix..." );
   }
   ppsCnt++;
   if ( ppsCnt == TXINTERVAL ) ppsCnt = 0;
-  if ( DEBUG ) {
+  if ( outputFlg && DEBUG ) {
     Serial.print( " ISR duration: " );
     Serial.println( micros() - tmpMicros );
   }
@@ -660,3 +786,5 @@ float readTemp( int pin, int sensType, float vRef ) {
             refTempC[sensType]);
   
 }
+
+
