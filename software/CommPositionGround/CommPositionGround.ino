@@ -54,7 +54,7 @@ const int TXINTERVAL = 10; // Seconds. Must match payload setting
 // Transceiver configuration constants
 // This string constant sets the TX power, where
 //   xtPwr = "0", "1", "2", "3", "4" --> 1, 10, 100, 500, 1000 mW
-const String xtPwr = "0";
+const String xtPwr = "4";
 
 // Array Sizes
 const int GPSLEN = 100; //max length of GPS sentence
