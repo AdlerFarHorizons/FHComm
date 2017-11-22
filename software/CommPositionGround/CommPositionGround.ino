@@ -51,10 +51,15 @@ const String SOURCEID = "GS0";
 const String PKTSUFFIX = "*";
 const int TXINTERVAL = 10; // Seconds. Must match payload setting
 
-// Transceiver configuration constants
+/*
+ * Digi 9XTend configured for Pin Sleep mode, 9600 Baud RF rate, 2 retries, RX LED on
+ * valid addresses only, TX Power per constant defined above:
+ */
+
 // This string constant sets the TX power, where
 //   xtPwr = "0", "1", "2", "3", "4" --> 1, 10, 100, 500, 1000 mW
 const String xtPwr = "4";
+const String xtConfStr = "ATSM1,BR0,RR2,CD4,PL" + xtPwr;
 
 // Array Sizes
 const int GPSLEN = 100; //max length of GPS sentence
@@ -119,16 +124,10 @@ const int eeaddrLastGPSTimeSync = eeaddrStart; // time_t
  * After the first received payload packet, pseudo-sync will occur and the TF
  * request will be between 1 and 2 sec prior to transmitting the ground station
  * response to the payload packet. If both payload and ground have GPS
- * synchronization, The request will be 1 sec prior to transmission.*/
+ * synchronization, The request will be 1 sec prior to transmission.
+ */
 const String gpsConfStr = "$PTNLSNM,0020,03*57\r\n";
 const String gpsTFReqStr = "$PTNLQTF*45\r\n";
-
-/*
- * Digi 9XTend configured for Pin Sleep mode, 9600 Baud RF rate, 2 retries, RX LED on
- * valid addresses only, TX Power per constant defined above:
- */
-
-const String xtConfStr = "ATSM1,BR0,RR2,CD4,PL" + xtPwr;
 
 // GPS variables
 char gps[GPSLEN], gpsZDA[GPSLEN], gpsTF[GPSLEN]; 
@@ -137,7 +136,7 @@ boolean gpsRdy, gpsZDAFlg, gpsTFFlg, gpsChkFlg, gpsErrFlg, gpsFixReqdFlg;
 boolean gpsPosValid, gpsMsgFlg, gpsTimeFlg, gpsTimeValid;
 byte gpsChk;
 float gpsLat, gpsLon, gpsAlt, gpsVe, gpsVn, gpsVu;
-int gpsYr, gpsMon, gpsDay, gpsHr, gpsMin, gpsSec, gpsFixQual;
+int gpsYr, gpsMon, gpsDay, gpsHr, gpsMin, gpsSec, gpsFixQual, gpsNumSats;
 int ppsCnt;
 
 // Receive variables
@@ -156,6 +155,7 @@ int numb; // Received payload transmit (sync) packet sequence mumber
 char tx[PKTLEN];
 int txIndex = 0;
 boolean txFlg, txPktFlg;
+
 
 // File system variables
 File logFile;
@@ -211,7 +211,8 @@ void setup(){
   delay( 5000 ); //Wait for GPS to power up.
   Serial.begin(9600);
   Serial1.begin(9600);  
-  Serial2.begin(9600); 
+  Serial2.begin(9600);
+  
   delay( 1000 ); // Give time for GPS serial TX line to bias up
 
   // Wait for internal serial ports to activate.
@@ -220,7 +221,8 @@ void setup(){
   while( !Serial1 );
   while( !Serial2 );
 
-  Serial.println( "Ground Station Unit" );
+
+  Serial.println( "Ground Station Unit\n" );
   Serial.println( "TX Power Setting " + xtPwr + "\n" );
 
   // Configure XTend
@@ -230,6 +232,7 @@ void setup(){
   while( Serial.available() ) Serial.read();
   while( Serial1.available() ) Serial1.read();
   while( Serial2.available() ) Serial2.read();
+
 
   // Send GPS Configuration messages
   gpsConfig();
@@ -301,6 +304,7 @@ void getInputByte() {
       // Save, set command flag, reset input system
       cmd[cmdIndex] = 0;
       cmdStr = (String)cmd;
+      cmdStr.toUpperCase();
       //cmdIndex = 0; // Reset command input buffer
       cmdInFlg = false;
       parseCmd();
@@ -353,7 +357,7 @@ void procCmd() {
   if ( cmdStr.charAt( 1 ) == 'R' ) {
     remCmdFlg = true;
   }
-}
+}                                                                                                   
 
 void getRXByte() {
   // "First Draft" packet acquisition based on simple start and end chars.
@@ -457,10 +461,11 @@ void procTFMsg() {
     Serial.print( "gpsPosValid:" );Serial.println( gpsPosValid );
     Serial.print( "gpsTimeValid:" );Serial.println( gpsTimeValid );
   }
+  // Get GPS info
+  gpsFixQual = getField( gpsTF, 5, ',' ).toInt();
+  gpsNumSats = getField( gpsTF, 4, ',' ).toInt();
+  // Get position, velocity data
   if ( gpsPosValid ) {
-    // Get GPS info
-    gpsFixQual = getField( gpsTF, 5, ',' ).toInt();
-    // Get position, velocity data
     String latStr = getField( gpsTF, 6, ',' );
     gpsLat = latStr.substring( 0,2 ).toFloat();      
     gpsLat = gpsLat + latStr.substring( 2 ).toFloat() / 60.0;
@@ -473,8 +478,17 @@ void procTFMsg() {
     gpsVe = getField( gpsTF, 11, ',' ).toFloat();
     gpsVn = getField( gpsTF, 12, ',' ).toFloat();
     gpsVu = getField( gpsTF, 13, ',' ).toFloat();
+  } else {      
+    gpsLat = 0.0;
+    gpsLat = 0.0;
+    gpsLon = 0.0;
+    gpsAlt = 0.0;
+    gpsVe = 0.0;
+    gpsVn = 0.0;
+    gpsVu = 0.0;
   }
   gpsTFFlg = false;
+  
 }
 
 void requestGPSFix() {
@@ -493,6 +507,7 @@ void makeTxPkt() {
     String( temperature, 1 ) + ',' +
     String( vBatt, 1 ) + ',' +
     String( vIn, 1 ) + ',' +
+    String( gpsNumSats ) + ',' +
     String( gpsFixQual ) + ',' +
     String( gpsLon,5 ) + ',' +
     String( gpsLat,5 ) + ',' +
@@ -719,10 +734,21 @@ void ppsSvc() {
   gpsZDAFlg = false;
   gpsTFFlg = false;
   
+
+  
+  
+  
+  
   if ( ppsCnt == TXINTERVAL - 2 ) {
+
+    
     gpsFixReqdFlg = true;
     if ( outputFlg && DEBUG ) Serial.println( "Getting GPS fix..." );
   }
+
+
+
+  
   ppsCnt++;
   if ( ppsCnt == TXINTERVAL ) ppsCnt = 0;
   if ( outputFlg && DEBUG ) {
@@ -786,5 +812,3 @@ float readTemp( int pin, int sensType, float vRef ) {
             refTempC[sensType]);
   
 }
-
-
