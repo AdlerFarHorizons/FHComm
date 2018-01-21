@@ -37,7 +37,6 @@
  * Serial:  External Serial Monitor through USB
  * Serial1: GPS
  * Serial2: RF data IN/OUT
- *
  */
 
 #include <TimeLib.h>
@@ -53,20 +52,20 @@ const String PKTSUFFIX = "*";
 const int TXINTERVAL = 10; // Seconds. Must match payload setting
 
 /*
- * Digi 9XTend configured for Pin Sleep mode, 9600 Baud RF rate, 2 retries, RX LED on
- * valid addresses only, TX Power per constant defined above:
+ * Digi 9XTend configured for Pin Sleep mode (SM1), 9600 Baud RF rate (BR0),
+ * 2 retries (RR2), RX LED on valid addresses only (CD4), minimum "after" and "before"
+ * command guard times (AT2, BT0), PAN ID 0x3426 (ID3426), and transmit power setting
+ * according to: 1,2,3,4 -> 1,10,500,1000 mW
  */
-
-// This string constant sets the TX power, where
-//   xtPwr = "0", "1", "2", "3", "4" --> 1, 10, 100, 500, 1000 mW
 const String xtPwr = "4";
-const String xtConfStr = "ATSM1,BR0,RR2,CD4,PL" + xtPwr;
+const String xtConfStr = "ATSM1,BR0,RR2,CD4,AT2,BT0,ID3426,PL" + xtPwr;
 
 // Array Sizes
 const int GPSLEN = 100; //max length of GPS sentence
 const int TERMLEN = 100; // Terminal input line length
 const int CMDLEN = TERMLEN;
-const int PKTLEN = 200;
+const int PKTLEN = 350;
+const int SPECTLEN = 50;
 
 // Hardware pin assignements
 const int xtRssiFiltPin = A9;
@@ -134,7 +133,7 @@ const String gpsTFReqStr = "$PTNLQTF*45\r\n";
 char gps[GPSLEN], gpsZDA[GPSLEN], gpsTF[GPSLEN]; 
 int gpsIndex = 0;
 boolean gpsRdy, gpsZDAFlg, gpsTFFlg, gpsChkFlg, gpsErrFlg, gpsFixReqdFlg;
-boolean gpsPosValid, gpsMsgFlg, gpsTimeFlg, gpsTimeValid;
+boolean gpsPosValid, gpsMsgFlg, gpsTimeFlg, gpsTimeValid, gpsDataRdyFlg;
 byte gpsChk;
 float gpsLat, gpsLon, gpsAlt, gpsVe, gpsVn, gpsVu;
 int gpsYr, gpsMon, gpsDay, gpsHr, gpsMin, gpsSec, gpsFixQual, gpsNumSats;
@@ -157,6 +156,7 @@ char tx[PKTLEN];
 int txIndex = 0;
 boolean txFlg, txPktFlg;
 
+boolean procDataFlg, pseudoSyncFlg;
 
 // File system variables
 File logFile;
@@ -183,6 +183,16 @@ char cmdStrings[NUMCMDCODES][CMDCODELEN] =
 // Sensor variables
 float temperature, vBatt, vIn;
 
+// Spectrum check variables
+boolean xtSpectFlg, xtSpectMSFlg, xtSpectLSFlg, xtSpectRdyFlg;
+int xtSpectIndex;
+int xtSpectData[SPECTLEN];
+
+// Debugging variables
+elapsedMillis msElapsed;
+elapsedMicros usElapsed;
+long pktDelivered, pktReceived;
+
 void setup(){
   
   pinMode( xtRxLedPin, INPUT );
@@ -208,6 +218,7 @@ void setup(){
   outputFlg = true;
   cmdIndex = 0;
   cmdFlg = false;
+  procDataFlg = false;
   
   delay( 5000 ); //Wait for GPS to power up.
   Serial.begin(9600);
@@ -278,8 +289,16 @@ void setup(){
     logFile.println( "\n====== Comm started ======\n" );
     logFile.flush();
   }
-  IntervalTimer rssiTimer;
+  xtSpectFlg = false;
+  xtSpectIndex = -1;
+  xtSpectMSFlg = false;
+  xtSpectLSFlg = false;
+
   attachInterrupt( gpsPpsPin, ppsSvc, RISING );
+
+  // Sample the filtered RSSI PWM signal at trailing edge of
+  // RX LED indication for use in the RSSI calculation.
+  //attachInterrupt( xtRxLedPin, rssiFiltMeas, FALLING );
 }
 
 void loop(){
@@ -288,6 +307,7 @@ void loop(){
   if ( gpsTFFlg ) procTFMsg();
   if ( gpsMsgFlg ) updateGPSMsg();
   if ( gpsFixReqdFlg ) requestGPSFix();
+  if ( procDataFlg ) procData();
   if ( txFlg ) sendTxPkt();
   if ( txPktFlg ) makeTxPkt();
   if ( rxPktFlg ) procRxPkt();
@@ -360,8 +380,37 @@ void procCmd() {
   }
 }                                                                                                   
 
+
 void getRXByte() {
   char c = Serial2.read();
+  if ( xtSpectFlg ) {
+    // Spectrum data as db below 0dBm as two hex chars converted
+    // to dB above -110dBm which results in fewer bytes to transmit
+    if ( xtSpectMSFlg ) {
+      xtSpectData[xtSpectIndex] = 110 - ( hexDigit2Int( c ) << 4 );
+      xtSpectMSFlg = false;
+      xtSpectLSFlg = true;
+    } else if ( xtSpectLSFlg ) {
+      //Serial.print( xtSpectIndex % 10 );
+      xtSpectData[xtSpectIndex] -= hexDigit2Int( c );
+      if ( DEBUG && outputFlg ) {
+        Serial.print( xtSpectData[xtSpectIndex] );
+        Serial.write( ',' );
+      }
+      xtSpectLSFlg = false;
+    } else if ( c == 13 ) {
+      xtSpectIndex++;
+      xtSpectMSFlg = true;
+    }
+    if ( xtSpectIndex == 50 ) {
+      xtSpectFlg = false;
+      xtSpectMSFlg = false;
+      xtSpectLSFlg = false;
+      xtSpectRdyFlg = true;
+      xtSpectIndex = -1;
+    }
+  }
+  
   if ( c == '$' ) {
     if ( outputFlg && DEBUG ) Serial.println( "\nRX msg started..." );
     rxRdy = false;
@@ -488,7 +537,7 @@ void procTFMsg() {
     gpsVu = 0.0;
   }
   gpsTFFlg = false;
-  
+  gpsDataRdyFlg = true;
 }
 
 void requestGPSFix() {
@@ -514,7 +563,16 @@ void makeTxPkt() {
     String( gpsAlt ) + ',' +
     String( gpsVe, 3 ).trim() + ',' +
     String( gpsVn, 3 ).trim() + ',' +
-    String( gpsVu, 3 ).trim() + ':';
+    String( gpsVu, 3 ).trim();
+
+  if ( xtSpectRdyFlg ) {
+    for ( int i = 0 ; i < SPECTLEN ; i++ ) {
+      txPktStr += ( ',' + String( xtSpectData[i] ) );
+    }
+  }
+  txPktStr += ',';
+  txPktStr += ':';
+
   if ( cmdFlg && remCmdFlg ) {
     txPktStr += cmdStr;
     cmdFlg = false;
@@ -522,10 +580,12 @@ void makeTxPkt() {
     cmdStr = "";
   }
   
-  txPktStr = PKTPREFIX + txPktStr + PKTSUFFIX;
+  txPktStr = PKTPREFIX + txPktStr + PKTSUFFIX; // + chkStr;
   txPktStr.toCharArray( tx, PKTLEN );
   txPktFlg = false;
   txFlg = true;
+  gpsDataRdyFlg = false;
+  xtSpectRdyFlg = false; 
 }
 
 void sendTxPkt() {
@@ -533,6 +593,7 @@ void sendTxPkt() {
   rssi = 0;
   numb++;
   txFlg = false;
+  procDataFlg = true;
 }
 
 void procRxPkt() {
@@ -541,7 +602,7 @@ void procRxPkt() {
   ppsCnt = 0;
   // If no GPS fix for either payload or ground, will be no more than 1 sec early.
   // If GPS acquired in both, it will be in precise sync with payload.
-
+  pseudoSyncFlg = true;
   if ( outputFlg ) {
     digitalClockDisplay( now() );
     Serial.println( " Received..." );  
@@ -635,7 +696,6 @@ void sendData() {
     i++;
   }
   Serial2.write( 10 );
-
   if ( outputFlg ) {
     digitalClockDisplay( now() );
     Serial.println( " Sending..." );
@@ -730,15 +790,22 @@ void ppsSvc() {
   gpsTFFlg = false;
   
 
-  
-  
-  
-  
+
+
+
+
+
   if ( ppsCnt == TXINTERVAL - 2 ) {
 
     
     gpsFixReqdFlg = true;
     if ( outputFlg && DEBUG ) Serial.println( "Getting GPS fix..." );
+
+    xtCommand( "ATRM" );
+    xtSpectFlg = true;
+    xtSpectIndex = -1;
+    xtSpectMSFlg = false;
+    xtSpectLSFlg = false;
   }
 
 
@@ -807,3 +874,63 @@ float readTemp( int pin, int sensType, float vRef ) {
             refTempC[sensType]);
   
 }
+
+void xtCommand( String xtCmd ) {
+  Serial2.print( "+++" );
+  delay( 210 );
+  Serial2.println( xtCmd );
+  Serial2.println( "ATCN" );
+}
+
+int hexDigit2Int( char digit ) {
+  if ( digit >= 48 && digit <= 57 ) {
+    return digit - 48;
+  } else if ( digit >= 65 && digit <= 70 ) {
+    return digit - 65 + 10; 
+  } else if ( digit >= 97 && digit <= 102 ) {
+    return digit - 97 + 10;
+  } else {
+    return 0;
+  }
+}
+
+/*
+ * If maxVal = 0, autoscale using next multiple of 10 higher than max value.
+ */
+void displaySpectrum( int spect[], int maxVal, int increment, int len ) {
+  int scale = maxVal;
+  if ( scale == 0 ) {
+    for ( int i = 0 ; i < len ; i++ ) if ( spect[i] > scale ) {
+      scale = 10 * floor( spect[i] / 10 ) + 10;
+    }
+  }
+  for ( int row = scale ; row >= 0 ; row -= increment ) {
+    Serial.write( '\n' );
+    if ( row < 10 ) Serial.write( ' ' );
+    if ( row < 100 ) Serial.write( ' ' );
+    Serial.print( row );
+    Serial.write( '|');
+    for ( int col = 0 ; col < len ; col++ ) {
+      if ( spect[col] > row - increment / 2 ) {
+        Serial.write( '*' );
+      } else {
+        Serial.write( ' ' );
+      }
+    }
+  }
+  Serial.write( '\n' );  
+}
+
+void procData() {
+  float deSense = 0;
+  for ( int i = 0 ; i < SPECTLEN ; i++ ) {
+    xtSpectData[i] = getField( rx, 16 + i, ',' ).toInt();
+    deSense += pow( 10, xtSpectData[i] / 10.0 ) - 1;
+  }
+  deSense = 10 * log10( deSense );
+  displaySpectrum( xtSpectData, 0, 2, 50 );
+  Serial.print( "De-Sense = " );Serial.print( deSense, 1 );
+  Serial.println( " dB" );
+  procDataFlg = false;
+}
+
