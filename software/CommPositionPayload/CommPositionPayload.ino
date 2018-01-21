@@ -16,7 +16,7 @@
  * 
  * Where S or Q signify a "set" or "query".
  * 
- * 
+ *
  * Remote Commands:
  * 
  * A field that can accomodate multiple remote command strings is
@@ -62,7 +62,7 @@ const String xtConfStr = "ATSM1,BR0,RR2,CD4,PL" + xtPwr;
 
 // Array Sizes
 const int GPSLEN = 100; //max length of GPS sentence
-const int TERMLEN = 100;
+const int TERMLEN = 100; // Terminal input line length
 const int CMDLEN = TERMLEN;
 const int PKTLEN = 200;
 
@@ -115,10 +115,10 @@ const int eeaddrLastGPSTimeSync = eeaddrStart; // time_t
  *      UTC at prior PPS output sometime after a fully valid 2D fix.
  *      
  * Based on a PPS signal count, a "TF" position fix sentence is requested one second
- * prior to packet transmission:
+ * prior to the last pps (the "TXINTERVAL'th") in the PPS count cycle.
  * 
  *  TF: Provides a complete 3D position and velocity fix but no date/time. 
- *      Also indicates whether time at last PPS is true UTC or GPS time.     
+ *      Also indicates whether time at last PPS is true UTC or GPS time.
  */
 const String gpsConfStr = "$PTNLSNM,0020,03*57\r\n";
 const String gpsTFReqStr = "$PTNLQTF*45\r\n";
@@ -179,7 +179,7 @@ char cmdStrings[NUMCMDCODES][CMDCODELEN] =
 float temperature, vBatt, vIn;
 
 void setup(){
-
+  
   pinMode( xtRxLedPin, INPUT );
   pinMode( xtCmdPin, OUTPUT );
   pinMode( xtSleepPin, OUTPUT );
@@ -351,8 +351,6 @@ void procCmd() {
 }
 
 void getRXByte() {
-  // "First Draft" packet acquisition based on simple start and end chars.
-  //    No checksum check                                                                                                                                                                                                                                                                                 
   char c = Serial2.read();
   if ( c == '$' || rxRdy ) {
     if ( outputFlg && DEBUG ) Serial.println( "\nRX msg started..." );
@@ -363,12 +361,12 @@ void getRXByte() {
       rxRdy = true;
       rxPktFlg = true;
       if ( outputFlg && DEBUG ) Serial.println( "\nRX msg ended." );
-    } 
+    }
   }
 
   if ( !rxRdy ) {
     rx[rxIndex] = c;
-    rxIndex++;
+    if ( rxIndex < PKTLEN ) rxIndex++;
     rx[rxIndex] = 0;
   }
 }
@@ -507,28 +505,22 @@ void makeTxPkt() {
     String( gpsVn, 3 ).trim() + ',' +
     String( gpsVu, 3 ).trim() + ',' +
     ">" + rxCmd + ':';
-  //Serial.print( cmdFlg );Serial.println( remCmdFlg );
+
   if ( cmdFlg && remCmdFlg ) {
     txPktStr += ( "<" + cmdStr );
     cmdFlg = false;
     remCmdFlg = false;
     cmdStr = "";
   }
-  byte chkSum = 0;
-  int txLen = txPktStr.length();
-  for ( int i = 0 ; i < txLen ; i++ ) {
-    chkSum ^=(byte)txPktStr.charAt(i);
-  }
-  String chkStr = String( chkSum, HEX );
-  if ( chkStr.length() == 1 ) chkStr = '0' + chkStr;
-  txPktStr = PKTPREFIX + txPktStr + PKTSUFFIX + chkStr;
+  
+  txPktStr = PKTPREFIX + txPktStr + PKTSUFFIX;
   txPktStr.toCharArray( tx, PKTLEN );
   txPktFlg = false;
   
 }
 
 void sendTxPkt() {
-  sendData();
+  sendData();  
   rssi = 0;
   numb++;
   txFlg = false;
@@ -779,7 +771,7 @@ void xtConfig( String configStr ) {
   Serial.print( "Configuring XTend... " );
   Serial2.print("+++");
   delay( 1100 );
-  Serial2.println( xtConfStr );
+  Serial2.println( configStr );
   Serial2.println( "ATCN" );
   delay( 1000 );
   while( Serial2.available() ) Serial.write( Serial2.read() );

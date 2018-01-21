@@ -34,9 +34,10 @@
  */
 
 /*
- * Serial:  External Serial Interface through USB
+ * Serial:  External Serial Monitor through USB
  * Serial1: GPS
  * Serial2: RF data IN/OUT
+ *
  */
 
 #include <TimeLib.h>
@@ -104,7 +105,7 @@ const int eeaddrLastGPSTimeSync = eeaddrStart; // time_t
 //const int eeaddrXxxx = eeaddrLastGPSTimeSync + sizeof( time_t );
 
 
-/*
+ /*
  * Copernicus II power up configuration is assumed to be set to defaults except
  * the Port B rate is set at 9600 Baud and Dynamics Mode is set to "Air".
  * 
@@ -117,9 +118,9 @@ const int eeaddrLastGPSTimeSync = eeaddrStart; // time_t
  *      
  * Based on a PPS signal count, a "TF" position fix sentence is requested 1 sec
  * prior to the last pps ("TXINTERVAL'th") in the PPS count cycle.
- *      : 
+ * 
  *  TF: Provides a complete 3D position and velocity fix but no date/time. 
- *      Also indicates whether time at last PPS is true UTC or GPS time.    
+ *      Also indicates whether time at last PPS is true UTC or GPS time.
  *      
  * After the first received payload packet, pseudo-sync will occur and the TF
  * request will be between 1 and 2 sec prior to transmitting the ground station
@@ -183,7 +184,7 @@ char cmdStrings[NUMCMDCODES][CMDCODELEN] =
 float temperature, vBatt, vIn;
 
 void setup(){
-
+  
   pinMode( xtRxLedPin, INPUT );
   pinMode( xtCmdPin, OUTPUT );
   pinMode( xtSleepPin, OUTPUT );
@@ -360,24 +361,23 @@ void procCmd() {
 }                                                                                                   
 
 void getRXByte() {
-  // "First Draft" packet acquisition based on simple start and end chars.
-  //    No checksum check
   char c = Serial2.read();
-  if ( c == '$' || rxRdy ) {
+  if ( c == '$' ) {
     if ( outputFlg && DEBUG ) Serial.println( "\nRX msg started..." );
     rxRdy = false;
     rxIndex = 0;
+    xtSpectFlg = false;
   } else {
     if ( c == '*' && !rxRdy ) { // End of in-process RX msg
       rxRdy = true;
       rxPktFlg = true;
       if ( outputFlg && DEBUG ) Serial.println( "\nRX msg ended." );
-    } 
+    }
   }
 
   if ( !rxRdy ) {
     rx[rxIndex] = c;
-    rxIndex++;
+    if ( rxIndex < PKTLEN ) rxIndex++;
     rx[rxIndex] = 0;
   }
 }
@@ -518,16 +518,11 @@ void makeTxPkt() {
   if ( cmdFlg && remCmdFlg ) {
     txPktStr += cmdStr;
     cmdFlg = false;
+    
     cmdStr = "";
   }
-  byte chkSum = 0;
-  int txLen = txPktStr.length();
-  for ( int i = 0 ; i < txLen ; i++ ) {
-    chkSum ^=(byte)txPktStr.charAt(i);
-  }
-  String chkStr = String( chkSum, HEX );
-  if ( chkStr.length() == 1 ) chkStr = '0' + chkStr;
-  txPktStr = PKTPREFIX + txPktStr + PKTSUFFIX + chkStr;
+  
+  txPktStr = PKTPREFIX + txPktStr + PKTSUFFIX;
   txPktStr.toCharArray( tx, PKTLEN );
   txPktFlg = false;
   txFlg = true;
@@ -777,7 +772,7 @@ void xtConfig( String configStr ) {
   Serial.print( "Configuring XTend... " );
   Serial2.print("+++");
   delay( 1100 );
-  Serial2.println( xtConfStr );
+  Serial2.println( configStr );
   Serial2.println( "ATCN" );
   delay( 1000 );
   while( Serial2.available() ) Serial.write( Serial2.read() );
