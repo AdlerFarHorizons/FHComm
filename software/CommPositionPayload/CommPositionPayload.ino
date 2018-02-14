@@ -41,8 +41,7 @@
  */
 
 #include <TimeLib.h>
-#include <SD.h>
-#include <SPI.h>
+#include "Maint.h"
 #include <EEPROM.h>
 
 // System configuration constants
@@ -133,12 +132,12 @@ const String gpsTFReqStr = "$PTNLQTF*45\r\n";
 // GPS Variables
 char gps[GPSLEN], gpsZDA[GPSLEN], gpsTF[GPSLEN];
 int gpsIndex = 0;
-boolean gpsRdy, gpsZDAFlg, gpsTFFlg, gpsChkFlg, gpsErrFlg, gpsFixReqdFlg;
-boolean gpsPosValid, gpsMsgFlg, gpsTimeFlg, gpsTimeValid, gpsDataRdyFlg;
+boolean gpsRdy, gpsChkFlg, gpsErrFlg, gpsMsgFlg, gpsDataRdyFlg;
+volatile boolean gpsPosValid, gpsZDAFlg, gpsTFFlg, gpsTimeFlg, gpsTimeValid, gpsFixReqdFlg;
 byte gpsChk;
 float gpsLat, gpsLon, gpsAlt, gpsVe, gpsVn, gpsVu;
 int gpsYr, gpsMon, gpsDay, gpsHr, gpsMin, gpsSec, gpsFixQual, gpsNumSats;
-int ppsCnt;
+volatile int ppsCnt;
 
 // Receive variables
 char rx[PKTLEN], rxBuf[PKTLEN];
@@ -186,8 +185,9 @@ char cmdStrings[NUMCMDCODES][CMDCODELEN] =
 float temperature, vBatt, vIn;
 
 // Spectrum check variables
-boolean xtSpectFlg, xtSpectMSFlg, xtSpectLSFlg, xtSpectRdyFlg;
-int xtSpectIndex;
+volatile boolean xtSpectFlg, xtSpectMSFlg, xtSpectLSFlg;
+boolean xtSpectRdyFlg;
+volatile int xtSpectIndex;
 int xtSpectData[SPECTLEN];
 
 // Debugging variables
@@ -270,9 +270,7 @@ void setup() {
   setSyncInterval( 10 );
   
   delay( 2000 );
-  if (!SD.begin( sdCsPin )) {
-    Serial.println("Card failed, or not present");
-    Serial.println( "SD Card failed or not present. Logging disabled" );
+  if ( !MaintInit( Serial, sdCsPin, outputFlg ) ) {
     isLogging = false;
   } else {
     String logFileNameStr = timeToFilename( now() );
@@ -298,6 +296,11 @@ void setup() {
   
   attachInterrupt( gpsPpsPin, ppsSvc, RISING );
   
+  // Sample the filtered RSSI PWM signal at trailing edge of
+  // RX LED indication for use in the RSSI calculation.
+  //attachInterrupt( xtRxLedPin, rssiFiltMeas, FALLING );
+}
+
 void loop() {
   if ( cmdFlg ) procCmd();
   if ( gpsZDAFlg ) procZDAMsg();
@@ -311,19 +314,7 @@ void loop() {
   if ( rssiFlg ) procRssi();
   if ( Serial1.available() ) getGPSByte();
   if ( Serial2.available() ) getRXByte();
-  if ( Serial3.available() ) getInputByte();
-}
-
-void getInputByte() {
-  char inChar = Serial3.read();
-  if ( !cmdFlg ) { //cmdInFlg && !cmdFlg ) {
-    if ( inChar == 'a' || inChar == 'b' ) {
-      cmdStr = '@' + String( inChar );
-      cmdStr.toUpperCase();
-      cmdInFlg = false;
-      parseCmd();
-    }    
-  }
+  if ( ( cmdStr = maintCheck() ) != "" ) parseCmd();
 }
 
 void parseCmd() {
