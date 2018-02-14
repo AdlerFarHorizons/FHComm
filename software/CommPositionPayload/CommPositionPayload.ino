@@ -9,13 +9,15 @@
 /*
  * COMMANDS;
  * 
- * Commands are entered via a terminal through the XBee interface
- * as (CR and/or LF ignored):
+ * Commands are entered via the terminal as (with CR and/or LF
+ * terminator required):
  * 
- * @[S|Q] <arg1> <arg2> ... <argN>!
+ * @[R|L] <arg1> <arg2> ... <argN>
  * 
- * Where S or Q signify a "set" or "query".
+ * Where R or L signify a Remote or Local command.
  * 
+ * Local commands are for interaction with the local unit, while
+ * Remote commands are sent in the next TX packet.
  * 
  * Remote Commands:
  * 
@@ -61,7 +63,7 @@ const String xtConfStr = "ATSM1,BR0,RR2,CD4,AT2,BT0,ID3426,PL" + xtPwr;
 
 // Array Sizes
 const int GPSLEN = 100; //max length of GPS sentence
-const int TERMLEN = 100;
+const int TERMLEN = 100; // Terminal input line length
 const int CMDLEN = TERMLEN;
 const int PKTLEN = 350;
 const int SPECTLEN = 50;
@@ -96,14 +98,14 @@ const float battMonToVolts = ( 9.0 / 8.5 ) * refVoltage * ( 10.0 + 47.0 ) / 10.0
 const float vinMonToVolts = ( 5.0 / 4.9 ) * refVoltage * ( 10.0 + 10.0 ) / 10.0 / 1024;
 
 /*
- * Set addresses of EEPROM parameters 
+ * Set addresses of EEPROM parameters
  */
 const int eeaddrStart = 256;
 const int eeaddrLastGPSTimeSync = eeaddrStart; // time_t
 //const int eeaddrXxxx = eeaddrLastGPSTimeSync + sizeof( time_t );
 
 
- /*
+/*
  * Copernicus II power up configuration is assumed to be set to defaults except
  * the Port B rate is set at 9600 Baud and Dynamics Mode is set to "Air".
  * 
@@ -117,14 +119,19 @@ const int eeaddrLastGPSTimeSync = eeaddrStart; // time_t
  * Based on a PPS signal count, a "TF" position fix sentence is requested one second
  * prior to packet transmission:
  * 
- *  TF: Provides a complete 3D position and velocity fix but no date/time. 
+ *  TF: Provides a complete 3D position and velocity fix but no date/time.
  *      Also indicates whether time at last PPS is true UTC or GPS time.
  */
+
+
+
+ 
+
 const String gpsConfStr = "$PTNLSNM,0020,03*57\r\n";
 const String gpsTFReqStr = "$PTNLQTF*45\r\n";
 
 // GPS Variables
-char gps[GPSLEN], gpsZDA[GPSLEN], gpsTF[GPSLEN]; 
+char gps[GPSLEN], gpsZDA[GPSLEN], gpsTF[GPSLEN];
 int gpsIndex = 0;
 boolean gpsRdy, gpsZDAFlg, gpsTFFlg, gpsChkFlg, gpsErrFlg, gpsFixReqdFlg;
 boolean gpsPosValid, gpsMsgFlg, gpsTimeFlg, gpsTimeValid, gpsDataRdyFlg;
@@ -149,7 +156,7 @@ int numb = 0; // Payload transmit (sync) packet sequence mumber
 // Transmit variables
 char tx[PKTLEN];
 int txIndex = 0;
-boolean txFlg, txPktFlg;
+boolean txFlg;
 int numbLastRx = -1;
 boolean procDataFlg;
 
@@ -158,7 +165,7 @@ File logFile;
 char logFileName[13];
 boolean isLogging;
 boolean outputFlg; // False suppresses debug & status output when
-                   //   interactive local command is active.
+                   // interactive local command is active.
 
 char cmd[CMDLEN]; // Command buffer includes arguments
 int cmdIndex; // Index for command string array, cmdStrings
@@ -168,12 +175,11 @@ boolean cmdFlg; // A command has been entered and is pending
 boolean remCmdFlg; // Pending command is remote if true, local if false
 char cmdChar = '@';
 // Command code format: L or R for Local or remote, followed by 2-char command
-const int NUMCMDCODES = 3; // Number of command codes
+const int NUMCMDCODES = 2; // Number of command codes
 const int CMDCODELEN = 4; // Includes extra char for null terminator
 
 char cmdStrings[NUMCMDCODES][CMDCODELEN] =
-  { "LFT", // Local file transfer
-    "a" ,
+  { "a" ,
     "b" }; // Switch platform video feed confirmation
 
 // Sensor variables
@@ -189,7 +195,7 @@ elapsedMillis msElapsed;
 elapsedMicros usElapsed;
 long pktDelivered, pktReceived;
 
-void setup(){
+void setup() {
   
   pinMode( xtRxLedPin, INPUT );
   pinMode( xtCmdPin, OUTPUT );
@@ -200,14 +206,14 @@ void setup(){
   pinMode( gpsXstbyPin, OUTPUT );
   pinMode( xtRssiPwmPin, INPUT );
   pinMode( xtNTxPin, INPUT );
-
+  
   digitalWrite( xtCmdPin, LOW );
   digitalWrite( xtSleepPin, LOW );
   digitalWrite( gpsXstbyPin, HIGH );
-
+  
   gpsMsgFlg = false;
   gpsRdy = true;
-  txPktFlg = false;
+
   rxPktFlg = false;
   rxIndex = 0;
   rssiState = 0;
@@ -218,29 +224,29 @@ void setup(){
   
   delay( 5000 ); //Wait for GPS to power up.
   Serial.begin(9600);
-  Serial1.begin(9600);  
+  Serial1.begin(9600);
   Serial2.begin(9600);
   Serial3.begin(9600);
   delay( 1000 ); // Give time for GPS serial TX line to bias up
-
+  
   // Wait for internal serial ports to activate.
   //    NOTE: "Serial", the external USB port, is NOT tested as it is not a required
   //    connection and will hang when not there.
-  while( !Serial1 );
-  while( !Serial2 );
-  while( !Serial3 );
+  while ( !Serial1 );
+  while ( !Serial2 );
+  while ( !Serial3 );
   
   Serial.println( "Payload Unit\n" );
   Serial.println( "TX Power Setting " + xtPwr + "\n" );
-
+  
   // Configure XTend
   xtConfig( xtConfStr );
-
+  
   // Clear out serial receive buffers
-  while( Serial.available() ) Serial.read();
-  while( Serial1.available() ) Serial1.read();
-  while( Serial2.available() ) Serial2.read();
-  while( Serial3.available() ) Serial3.read();
+  while ( Serial.available() ) Serial.read();
+  while ( Serial1.available() ) Serial1.read();
+  while ( Serial2.available() ) Serial2.read();
+  while ( Serial3.available() ) Serial3.read();
   
   // Send GPS Configuration messages
   gpsConfig();
@@ -262,7 +268,7 @@ void setup(){
    */
   setSyncProvider( getTeensy3Time );
   setSyncInterval( 10 );
-
+  
   delay( 2000 );
   if (!SD.begin( sdCsPin )) {
     Serial.println("Card failed, or not present");
@@ -289,11 +295,10 @@ void setup(){
   xtSpectIndex = -1;
   xtSpectMSFlg = false;
   xtSpectLSFlg = false;
-
+  
   attachInterrupt( gpsPpsPin, ppsSvc, RISING );
-}
-
-void loop(){
+  
+void loop() {
   if ( cmdFlg ) procCmd();
   if ( gpsZDAFlg ) procZDAMsg();
   if ( gpsTFFlg ) procTFMsg();
@@ -407,7 +412,7 @@ void getRXByte() {
       rxRdy = true;
       rxPktFlg = true;
       if ( outputFlg && DEBUG ) Serial.println( "\nRX msg ended." );
-    } 
+    }
   }
 
   if ( !rxRdy ) {
@@ -475,9 +480,9 @@ void procZDAMsg() {
   if ( outputFlg && DEBUG ) Serial.println( gpsZDA );
   String utc = getField( gpsZDA, 1, ',' );
   if ( utc.length() > 0 ) {
-    gpsHr = utc.substring( 0,2 ).toInt();
-    gpsMin = utc.substring( 2,4 ).toInt();
-    gpsSec = utc.substring( 4,6 ).toInt();
+    gpsHr = utc.substring( 0, 2 ).toInt();
+    gpsMin = utc.substring( 2, 4 ).toInt();
+    gpsSec = utc.substring( 4, 6 ).toInt();
     gpsDay = getField( gpsZDA, 2, ',' ).toInt();
     gpsMon = getField( gpsZDA, 3, ',' ).toInt();
     gpsYr = getField( gpsZDA, 4, ',' ).toInt();
@@ -502,18 +507,18 @@ void procTFMsg() {
   // Get position, velocity data
   if ( gpsPosValid ) {
     String latStr = getField( gpsTF, 6, ',' );
-    gpsLat = latStr.substring( 0,2 ).toFloat();      
+    gpsLat = latStr.substring( 0, 2 ).toFloat();
     gpsLat = gpsLat + latStr.substring( 2 ).toFloat() / 60.0;
     if ( getField( gpsTF, 7, ',' ) == 'S' ) gpsLat *= -1.0;
     String lonStr = getField( gpsTF, 8, ',' );
-    gpsLon = lonStr.substring( 0,3 ).toFloat();
+    gpsLon = lonStr.substring( 0, 3 ).toFloat();
     gpsLon = gpsLon + lonStr.substring( 3 ).toFloat() / 60.0;
     if ( getField( gpsTF, 9, ',' ) == 'W' ) gpsLon *= -1.0;
     gpsAlt = getField( gpsTF, 10, ',' ).toFloat();
     gpsVe = getField( gpsTF, 11, ',' ).toFloat();
     gpsVn = getField( gpsTF, 12, ',' ).toFloat();
     gpsVu = getField( gpsTF, 13, ',' ).toFloat();
-  } else {      
+  } else {
     gpsLat = 0.0;
     gpsLat = 0.0;
     gpsLon = 0.0;
@@ -544,8 +549,8 @@ void makeTxPkt() {
     String( vIn, 1 ) + ',' +
     String( gpsNumSats ) + ',' +
     String( gpsFixQual ) + ',' +
-    String( gpsLon,5 ) + ',' +
-    String( gpsLat,5 ) + ',' +
+    String( gpsLon, 5 ) + ',' +
+    String( gpsLat, 5 ) + ',' +
     String( gpsAlt ) + ',' +
     String( gpsVe, 3 ).trim() + ',' +
     String( gpsVn, 3 ).trim() + ',' +
@@ -568,10 +573,10 @@ void makeTxPkt() {
   
   txPktStr = PKTPREFIX + txPktStr + PKTSUFFIX; // + chkStr;
   txPktStr.toCharArray( tx, PKTLEN );
-  txPktFlg = false;
+
   
   gpsDataRdyFlg = false;
-  xtSpectRdyFlg = false; 
+  xtSpectRdyFlg = false;
 }
 
 void sendTxPkt() {
@@ -591,7 +596,7 @@ void procRxPkt() {
 
   if ( outputFlg ) {
     digitalClockDisplay( now() );
-    Serial.println( " Received..." );  
+    Serial.println( " Received..." );
     Serial.println( rx );
   }
   if ( isLogging ) {
@@ -621,7 +626,7 @@ void procRssi() {
   rssiFlg = false;
   rssi = calcRssi();
 }
-  
+
 void rssiStart() {
   detachInterrupt( xtRssiPwmPin );
   if ( rssiState == 1 ) {
@@ -656,7 +661,7 @@ void rssiMeas() {
 
 void rssiStop() {
   detachInterrupt( xtRssiPwmPin );
-  if ( rssiState == 3 ){
+  if ( rssiState == 3 ) {
     rssiEndTime = rssiTime;
     rssiState = 4;
     rssiFlg = true;
@@ -685,12 +690,11 @@ String getField( String str, int fieldIndex, char delim ) {
 void sendData() {
   attachInterrupt( xtNTxPin, measV, FALLING );
   int i = 0;
-  while( tx[i] != 0 ) {
+  while ( tx[i] != 0 ) {
     Serial2.write( tx[i] );
     i++;
   }
   Serial2.write( 10 );
-
   if ( outputFlg ) {
     digitalClockDisplay( now() );
     Serial.println( " Sending..." );
@@ -725,13 +729,13 @@ void digitalClockDisplay(time_t t) {
   Serial.print(" ");
   Serial.print(month(t));
   Serial.print(" ");
-  Serial.print(year(t)); 
+  Serial.print(year(t));
 }
 
-void printDigits(int digits){
+void printDigits(int digits) {
   // utility function for digital clock display: prints preceding colon and leading 0
   Serial.print(":");
-  if(digits < 10) Serial.print('0');
+  if (digits < 10) Serial.print('0');
   Serial.print(digits);
 }
 
@@ -762,7 +766,7 @@ void ppsSvc() {
   if ( outputFlg && DEBUG ) digitalClockDisplay( now() );
   if ( gpsTimeValid && gpsTimeFlg ) {
     time_t oldTime = getTeensy3Time();
-    setTime( gpsHr,gpsMin,gpsSec,gpsDay,gpsMon,gpsYr ); // "Library" time    
+    setTime( gpsHr, gpsMin, gpsSec, gpsDay, gpsMon, gpsYr ); // "Library" time
     time_t newTime = now() + 1;
     setTime( newTime );
     Teensy3Clock.set( newTime ); // Teensy RTC
@@ -772,7 +776,7 @@ void ppsSvc() {
          ( newTime - temp ) >= maxTimeSyncAge ) ) {
       EEPROM.put( eeaddrLastGPSTimeSync, newTime );
       if ( outputFlg && DEBUG ) {
-        Serial.print( "Time Corrected:" );      
+        Serial.print( "Time Corrected:" );
       }
     }
   }
@@ -837,19 +841,19 @@ void xtConfig( String configStr ) {
   Serial2.println( configStr );
   Serial2.println( "ATCN" );
   delay( 1000 );
-  while( Serial2.available() ) Serial.write( Serial2.read() );
+  while ( Serial2.available() ) Serial.write( Serial2.read() );
   Serial.println( "" );
 }
 
 /*
-  This is a function you can add to read the temperature
-  from one of several devices:
-  
-  Arguments:
-  pin (int) Analog pin number attached to sensor.
-  sensType (int) Selects one of three sensor types.
-  vRef (float) The arduino's supply voltage (5.0 for UNO)
-*/
+ * This is a function you can add to read the temperature
+ * from one of several devices:
+ * 
+ * Arguments:
+ * pin (int) Analog pin number attached to sensor.
+ * sensType (int) Selects one of three sensor types.
+ * vRef (float) The arduino's supply voltage (5.0 for UNO)
+ */
 
 float readTemp( int pin, int sensType, float vRef ) {
   // sensType parameter vs. Temperature Sensor type:
@@ -864,9 +868,9 @@ float readTemp( int pin, int sensType, float vRef ) {
   //Serial.print( "Vtemp:" );Serial.println( reading );
   float mVolts = reading * vRef / 1.024;
 
-  return( ( mVolts - mVoltsAtRefTemp[sensType] ) / 
-            ( mVperDegC[sensType] ) + 
-            refTempC[sensType]);
+  return ( ( mVolts - mVoltsAtRefTemp[sensType] ) / 
+           ( mVperDegC[sensType] ) + 
+             refTempC[sensType]);
   
 }
 
@@ -913,7 +917,7 @@ void displaySpectrum( int spect[], int maxVal, int increment, int len ) {
       }
     }
   }
-  Serial.write( '\n' );  
+  Serial.write( '\n' );
 }
 
 void procData() {
