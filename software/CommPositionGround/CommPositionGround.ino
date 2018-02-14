@@ -1,3 +1,4 @@
+const String swVersion = "CommPositionGround 1.1.0dev";
 /*
  * Arduino IDE Board Selection: Teensy 3.1 or 3.2
  * Device: MK20DX256VLH7 (NXP K20P64M72SF1 Spec)
@@ -66,6 +67,7 @@ const int TERMLEN = 100; // Terminal input line length
 const int CMDLEN = TERMLEN;
 const int PKTLEN = 350;
 const int SPECTLEN = 50;
+const int SERIALTIMEOUT = 10000; //msec
 
 // Hardware pin assignements
 const int xtRssiFiltPin = A9;
@@ -236,7 +238,7 @@ void setup() {
   while ( !Serial2 );
   
   
-  Serial.println( "Ground Station Unit\n" );
+  Serial.println( "SW Version: " + swVersion );
   Serial.println( "TX Power Setting " + xtPwr + "\n" );
   
   // Configure XTend
@@ -254,7 +256,8 @@ void setup() {
   delay( 200 );
   Serial.println( "waiting for GPS response..." );
   char tmpChar = 0;
-  while ( tmpChar != 10 ) {
+  msElapsed = 0;
+  while ( tmpChar != 10 && msElapsed < SERIALTIMEOUT ) {
     if (Serial1.available() ) {
       tmpChar = Serial1.read();
       Serial.write( tmpChar );
@@ -287,6 +290,9 @@ void setup() {
   
   if (isLogging ) {
     logFile.println( "\n====== Comm started ======\n" );
+    logFile.print( "T/R, Source,Packet Index,Last Reply,RSSI(dBm)," );
+    logFile.print( "Epoch,T,Vbat,Vcc,NSats,GPS Qual,Lon,Lat,Alt,Ve," );
+    logFile.print( "Vn,Vu,Spectrum[0..49](dBm+110),Command Stuff...\n\n" );
     logFile.flush();
   }
   xtSpectFlg = false;
