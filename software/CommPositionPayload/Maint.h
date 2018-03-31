@@ -29,6 +29,7 @@ void _listDirectory( File, int );
 boolean MaintInit( usb_serial_class &port, int sdcs, boolean &outputEnableFlg ) {
   _port = port; // For global access;
   _outputEnableFlgAddr = &outputEnableFlg;
+  _maintEchoFlg = true;
   boolean _sdValidFlg;
   _port.print( "Initializing SD card..." );
 
@@ -59,14 +60,16 @@ void _getMaintByte() {
         _maintLineEndFlg = false;
       } else {
         _maintLineEndFlg = true;
-        _maintCmdFlg = true;
-        _port.write( '\n' );
+        _maintCmdFlg = ( _maintCmdStr != "" );
+        //_port.write( '\n' );
       }
     } else {
       _maintCmdStr += inByte;
-      if ( _maintEchoFlg ) _port.write( inByte );
       _maintLineEndFlg = false;
     }
+  }
+  if ( _maintEchoFlg && _maintModeFlg ) {
+    _port.write( inByte );
   }
 }
 
@@ -86,6 +89,7 @@ String _procMaintCmd() {
   remCode.toUpperCase();
   if ( _maintModeFlg ) {
     if ( _maintFtpModeFlg ) {
+      tmpStr = "";
       if ( remCode == "LS" ) {
         _port.print("\n");
         _listDirectory( _sdRoot, 0 );
@@ -98,7 +102,7 @@ String _procMaintCmd() {
   //      }
   //      _port.print( "\nFTP> " );
       } else if ( remCode == "BYE" ) {
-        _port.println( "\nLeaving FTP Mode\n" );
+        _port.print( "\nLeaving FTP Mode...\n\n>" );
         _maintFtpModeFlg = false;
       } else if ( remCode == "GET" ) {
         _sdFile = SD.open( tmp );
@@ -117,33 +121,37 @@ String _procMaintCmd() {
       } else {      
         _port.print( "\nFTP> " );
       }
-    }
+    } else {
   
-    if ( !_maintFtpModeFlg ) {
+    //if ( !_maintFtpModeFlg ) {
       if ( remCode == "FTP" ) {
         _port.println( "\n\nEntering FTP Mode..." );
         _maintFtpModeFlg = true;
         _sdRoot = SD.open("/");
         _port.print( "\nFTP> " );
+        tmpStr = "";
       } else if ( remCode == "ECHO" ) {
         if ( strcmp( tmp, "on" ) == 0 ) _maintEchoFlg = true;
         if ( strcmp( tmp, "off" ) == 0 ) _maintEchoFlg = false;
         _port.print( "\n> " );
+        tmpStr = "";
       } else if ( remCode == "EXIT" ) {
         _maintModeFlg = false;
         (*_outputEnableFlgAddr) = true;
         _maintEchoFlg = false;
         _port.println( "\nLeaving maintenance mode" );
+        tmpStr = "";
       } else {
         _port.print( "\n> " );
       }
     }
-    tmpStr = "";
   } else if ( remCode == "CMD" ) {
     _maintModeFlg = true;
     (*_outputEnableFlgAddr) = false;
     _port.println( "\nEntering maintenance mode" );
     _port.print( "\n> " );
+    tmpStr = "";
+  } else {
     tmpStr = "";
   }
   return tmpStr;
