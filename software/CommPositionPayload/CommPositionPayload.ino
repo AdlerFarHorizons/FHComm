@@ -83,6 +83,7 @@ const int sdCdPin = 5;
 const int gpsPpsPin = 2;
 const int gpsXstbyPin = 3;
 const int xtRssiPwmPin = 4;
+const int xBeeSleepPin = A14;
 
 // Time sync constants
 const float xtalTol = 20e-6;
@@ -212,6 +213,7 @@ void setup() {
   digitalWrite( xtCmdPin, LOW );
   digitalWrite( xtSleepPin, LOW );
   digitalWrite( gpsXstbyPin, HIGH );
+  analogWrite( xBeeSleepPin, 0 );
   
   gpsMsgFlg = false;
   gpsRdy = true;

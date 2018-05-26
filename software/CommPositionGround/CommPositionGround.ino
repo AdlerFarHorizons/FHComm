@@ -83,6 +83,7 @@ const int sdCdPin = 5;
 const int gpsPpsPin = 2;
 const int gpsXstbyPin = 3;
 const int xtRssiPwmPin = 4;
+const int xBeeSleepPin = A14;
 
 // Time sync constants
 const float xtalTol = 20e-6;
@@ -212,6 +213,7 @@ void setup() {
   digitalWrite( xtCmdPin, LOW );
   digitalWrite( xtSleepPin, LOW );
   digitalWrite( gpsXstbyPin, HIGH );
+  digitalWrite( xBeeSleepPin, LOW );
   
   gpsMsgFlg = false;
   gpsRdy = true;
@@ -228,6 +230,7 @@ void setup() {
   Serial.begin(9600);
   Serial1.begin(9600);
   Serial2.begin(9600);
+  Serial3.begin(9600);
   
   delay( 1000 ); // Give time for GPS serial TX line to bias up
   
@@ -593,7 +596,7 @@ void procRxPkt() {
   pseudoSyncFlg = true;
   if ( outputFlg ) {
     digitalClockDisplay( now() );
-    Serial.println( " Received..." );
+    Serial.println( " Packet Received..." );
     Serial.println( rx );
   }
   if ( isLogging ) {
