@@ -144,7 +144,7 @@ volatile int ppsCnt;
 
 // Receive variables
 char rx[PKTLEN], rxBuf[PKTLEN];
-String rxCmd;
+String uplinkCmd;
 int rxIndex;
 boolean rxRdy, rxPktFlg, rxChkFlg, rxErrFlg, rxBufCurrent, rxValid;
 boolean rxFlg, rxNewFlg;
@@ -161,6 +161,9 @@ int txIndex = 0;
 boolean txFlg;
 int numbLastRx = -1;
 boolean procDataFlg;
+boolean downlinkMsgFlg;
+boolean msgWindowFlg;
+boolean uplinkMsgFlg;
 
 // File system variables
 File logFile;
@@ -175,7 +178,6 @@ String cmdStr; // Current full command string (command code + args)
 boolean cmdInFlg; // A command is being entered;
 boolean cmdFlg; // A command has been entered and is pending
 boolean remCmdFlg; // Pending command is remote if true, local if false
-char cmdChar = '@';
 // Command code format: L or R for Local or remote, followed by 2-char command
 const int NUMCMDCODES = 2; // Number of command codes
 const int CMDCODELEN = 4; // Includes extra char for null terminator
@@ -183,6 +185,12 @@ const int CMDCODELEN = 4; // Includes extra char for null terminator
 char cmdStrings[NUMCMDCODES][CMDCODELEN] =
   { "a" ,
     "b" }; // Switch platform video feed confirmation
+
+// Intra-payload communication via xbee
+const char IPMSG_START = '@';
+const char IPMSG_END = '!';
+boolean ipMsgInFlg, ipMsgPendingFlg;
+String ipMsgStr;
 
 // Sensor variables
 float temperature, vBatt, vIn;
@@ -197,9 +205,9 @@ int xtSpectData[SPECTLEN];
 elapsedMillis msElapsed;
 elapsedMicros usElapsed;
 long pktDelivered, pktReceived;
+String tmpStr;
 
 void setup() {
-  
   pinMode( xtRxLedPin, INPUT );
   pinMode( xtCmdPin, OUTPUT );
   pinMode( xtSleepPin, OUTPUT );
@@ -230,7 +238,7 @@ void setup() {
   Serial.begin(9600);
   Serial1.begin(9600);
   Serial2.begin(9600);
-  Serial3.begin(9600);
+  Serial3.begin(115200);
   delay( 1000 ); // Give time for GPS serial TX line to bias up
   
   // Wait for internal serial ports to activate.
@@ -310,6 +318,14 @@ void setup() {
 }
 
 void loop() {
+  usElapsed = 0;
+  if ( ipMsgPendingFlg ) procIpMsg();
+  if ( msgWindowFlg ) {
+    if ( uplinkMsgFlg ) {
+      Serial3.print( uplinkCmd );
+      uplinkMsgFlg = false;
+    }
+  }
   if ( cmdFlg ) procCmd();
   if ( gpsZDAFlg ) procZDAMsg();
   if ( gpsTFFlg ) procTFMsg();
@@ -322,20 +338,20 @@ void loop() {
   if ( rssiFlg ) procRssi();
   if ( Serial1.available() ) getGPSByte();
   if ( Serial2.available() ) getRXByte();
-  if ( ( cmdStr = maintCheck() ) != "" ) parseCmd();
+  if ( Serial3.available() ) getXbeeByte();
+  if ( ( tmpStr = maintCheck() ) != "" ) parseCmd();
+  //Serial3.println( usElapsed );
+}
+
+void procIpMsg() {
+  downlinkMsgFlg = true;
 }
 
 void parseCmd() {
+  cmdStr = tmpStr;
+  Serial.println( cmdStr );
   // NOTE: getField ignores 1st (command) char
   String tmpCmd = getField( cmdStr, 0, ' ' );
-  if ( tmpCmd == "A" || tmpCmd == "B" ) {
-    cmdFlg = true;
-    cmdStr = "@RVS " + tmpCmd;
-  } else {
-    cmdFlg = false;
-    cmdStr = "";
-  }
-  
 //  if ( tmpCmd.length() == 3 ) {
 //    // Extract 3-char command string without arguments
 //    int tmpIndex = -1;
@@ -371,6 +387,30 @@ void procCmd() {
 //  }
 }
 
+void getXbeeByte() {
+  char c = Serial3.read();
+  if ( !ipMsgPendingFlg ) {
+    if ( ipMsgInFlg ) {
+      // Add to message string if char passes filters   
+      if ( c >= 65 && c <= 122 || c == 32 ) { // alpha + [\]^_` or space
+        ipMsgStr += c;
+      }
+      // On end char, disable further msg input, flag pending msg
+      // msg processing must reset msgPendingFlg when done.
+      if ( c == '!' ) {
+        ipMsgInFlg = false;
+        ipMsgPendingFlg = true;
+        ipMsgStr += c;
+      }
+    }
+    // On start char, enable msg input unless unprocessed message
+    if ( c == '@' && !ipMsgPendingFlg ) {
+      ipMsgInFlg = true;
+      ipMsgStr += c;
+    }
+  
+  }
+}
 void getRXByte() {
   char c = Serial2.read();
   if ( xtSpectFlg ) {
@@ -561,13 +601,15 @@ void makeTxPkt() {
     }
   }
   txPktStr += ',';
-  txPktStr += ( ">" + rxCmd + ':' );
+  txPktStr += ':';
+  txPktStr += ( ">" + uplinkCmd );
 
-  if ( cmdFlg && remCmdFlg ) {
-    txPktStr += ( "<" + cmdStr );
-    cmdFlg = false;
-    remCmdFlg = false;
-    cmdStr = "";
+  if ( downlinkMsgFlg ) {
+    ipMsgStr.toUpperCase();
+    txPktStr += ( '<' + ipMsgStr );
+    downlinkMsgFlg = false;
+    ipMsgPendingFlg = false;
+    ipMsgStr = "";
   }
   
   txPktStr = PKTPREFIX + txPktStr + PKTSUFFIX; // + chkStr;
@@ -595,8 +637,12 @@ void procRxPkt() {
 
   if ( outputFlg ) {
     digitalClockDisplay( now() );
-    Serial.println( " Received..." );
-    Serial.println( rx );
+    Serial.println( " Packet eceived..." );
+    for ( int i = 0 ; i < 16 ; i++ ) {
+      Serial.print( getField( rx, i, ',' ) );
+      Serial.write( ',' );
+    }
+    Serial.println( getField( rx, 66, ',' ) );
   }
   if ( isLogging ) {
     logFile.print( " RX:" );
@@ -610,13 +656,14 @@ void procRxPkt() {
 
   numbLastRx = getField( rx, 1, ',' ).toInt(); // Records the last sequence number reply received from ground station  
   // Parse uplink command
-  rxCmd = getField( rx, 1, ':' );
-  if ( rxCmd.length() > 0 ) {
-    Serial3.print( getField( rxCmd, 1, ' ' ) );
+  uplinkCmd = getField( rx, 1, ':' );
+  if ( uplinkCmd.length() > 0 ) {
+    uplinkMsgFlg = true;
     Serial.println( "" );
-    Serial.print( "Uplink command rcvd: " );Serial.println( rxCmd );
+    Serial.print( "Uplink command rcvd: " );Serial.println( uplinkCmd );
     Serial.println( "" );
-    
+    //Serial3.print( uplinkCmd );
+    uplinkMsgFlg = true;
   }
 }
 
@@ -697,7 +744,11 @@ void sendData() {
   if ( outputFlg ) {
     digitalClockDisplay( now() );
     Serial.println( " Sending..." );
-    Serial.println( tx );
+    for ( int i = 0 ; i < 16 ; i++ ) {
+      Serial.print( getField( tx, i, ',' ) );
+      Serial.write( ',' );
+    }
+    Serial.println( getField( tx, 66, ',' ) );
   }
   if ( isLogging ) {
     logFile.print( " TX:" );
@@ -806,8 +857,16 @@ void ppsSvc() {
     xtSpectLSFlg = false;
   }
   if ( ppsCnt == 1 ) {
-    if ( outputFlg && DEBUG ) Serial.println( "XTend back to sleep..." );
+    if ( outputFlg && DEBUG ) Serial.println( "XTend to sleep, awaking XBee..." );
     digitalWrite( xtSleepPin, HIGH );
+    analogWrite( xBeeSleepPin, 0 );
+    delay( 3 ); // XBee recovery from pin doze is 2ms
+    msgWindowFlg = true;
+  }
+  if ( ppsCnt == 2 ) {
+    if ( outputFlg && DEBUG ) Serial.println( "XBee to Sleep..." );
+    analogWrite( xBeeSleepPin, 1023 );
+    msgWindowFlg = false;
   }
   ppsCnt++;
   if ( ppsCnt == TXINTERVAL ) ppsCnt = 0;

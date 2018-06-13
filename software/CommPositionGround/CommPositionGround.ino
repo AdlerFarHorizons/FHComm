@@ -144,7 +144,7 @@ volatile int ppsCnt;
 
 // Receive variables
 char rx[PKTLEN], rxBuf[PKTLEN];
-
+String downlinkMsg;
 int rxIndex;
 boolean rxRdy, rxPktFlg, rxChkFlg, rxErrFlg, rxBufCurrent, rxValid;
 boolean rxFlg, rxNewFlg;
@@ -161,6 +161,7 @@ int txIndex = 0;
 boolean txFlg, txPktFlg;
 
 boolean procDataFlg, pseudoSyncFlg;
+boolean downlinkMsgFlg;
 
 // File system variables
 File logFile;
@@ -172,9 +173,10 @@ boolean outputFlg; // False suppresses debug & status output when
 char cmd[CMDLEN]; // Command buffer includes arguments
 int cmdIndex; // Index for command string array, cmdStrings
 String cmdStr; // Current full command string (command code + args)
+String cmdStrTmp;
 boolean cmdInFlg; // A command is being entered;
 boolean cmdFlg; // A command has been entered and is pending
-boolean remCmdFlg; // Pending command is remote if true, local if false
+boolean remCmdFlg; // Pending command is remote if true
 char cmdChar = '@';
 // Command code format: L or R for Local or remote, followed by 2-char command
 const int NUMCMDCODES = 1; // Number of command codes
@@ -323,12 +325,12 @@ void loop() {
   if ( rssiFlg ) procRssi();
   if ( Serial1.available() ) getGPSByte();
   if ( Serial2.available() ) getRXByte();
-  if ( ( cmdStr = maintCheck() ) != "" ) parseCmd();
+  if ( ( cmdStrTmp = maintCheck() ) != "" ) parseCmd();
 }
 
 void parseCmd() {
   // NOTE: getField ignores 1st (command) char
-  String tmpCmd = getField( cmdStr, 0, ' ' );
+  String tmpCmd = getField( cmdStrTmp, 0, ' ' );
 
   
   
@@ -337,7 +339,7 @@ void parseCmd() {
   
   
   
-    if ( tmpCmd.length() == 3 ) {
+  if ( tmpCmd.length() == 3 ) {
     // Extract 3-char command string without arguments
     int tmpIndex = -1;
     // Get command index
@@ -347,7 +349,8 @@ void parseCmd() {
 
     if ( tmpIndex < 0 ) {
       Serial.println( "\n'" + tmpCmd + "' is not a valid command\n" );
-      cmdStr = "";
+      cmdStrTmp = "";
+      cmdFlg = false;
     } else {
       // Valid command received.
       Serial.println( "\n'" + tmpCmd + "' Command entered\n" );
@@ -355,20 +358,20 @@ void parseCmd() {
     }
   } else {
     Serial.println( "\n'" + tmpCmd + "' is not a valid command\n" );
-    cmdStr = "";
+    cmdStrTmp = "";
+    cmdFlg = false;
   }
 }
 
 void procCmd() {
-
-  if ( cmdStr.charAt( 1 ) == 'L' ) {
-    Serial.println( "\nProcessing local command '" + cmdStr + "'\n");
-    remCmdFlg = false;
-    cmdFlg = false;
-    cmdStr = "";
+  cmdFlg = false;
+  if ( cmdStrTmp.charAt( 1 ) == 'L' ) {
+    Serial.println( "\nProcessing local command '" + cmdStrTmp + "'\n");
+    // procLocalCmd();
   }
-  if ( cmdStr.charAt( 1 ) == 'R' ) {
+  if ( cmdStrTmp.charAt( 1 ) == 'R' ) {
     remCmdFlg = true;
+    cmdStr = cmdStrTmp;
   }
 }
 
@@ -563,11 +566,9 @@ void makeTxPkt() {
   }
   txPktStr += ',';
   txPktStr += ':';
-
-  if ( cmdFlg && remCmdFlg ) {
+  if ( remCmdFlg ) {
     txPktStr += cmdStr;
-    cmdFlg = false;
-
+    remCmdFlg = false;
     cmdStr = "";
   }
   
@@ -597,7 +598,11 @@ void procRxPkt() {
   if ( outputFlg ) {
     digitalClockDisplay( now() );
     Serial.println( " Packet Received..." );
-    Serial.println( rx );
+    for ( int i = 0 ; i < 16 ; i++ ) {
+      Serial.print( getField( rx, i, ',' ) );
+      Serial.write( ',' );
+    }
+    Serial.println( getField( rx, 66, ',' ) );
   }
   if ( isLogging ) {
     logFile.print( " RX:" );
@@ -610,6 +615,15 @@ void procRxPkt() {
   attachInterrupt( xtRssiPwmPin, rssiStart, RISING );
 
   numb = getField( rx, 1, ',' ).toInt(); // Get payload packet index
+  // Parse uplink command
+  downlinkMsg = getField( rx, 1, ':' );
+  if ( downlinkMsg.length() > 1 ) {
+    Serial.println( "" );
+    Serial.print( "Downlink command rcvd: " );Serial.println( downlinkMsg );
+    Serial.println( "" );
+    //Serial3.print( downLinkMsg );
+    downlinkMsgFlg = true;
+  }
   txPktFlg = true; // Trigger Ground Station TX process on Payload RX packet receipt.
 }
 
@@ -698,7 +712,11 @@ void sendData() {
   if ( outputFlg ) {
     digitalClockDisplay( now() );
     Serial.println( " Sending..." );
-    Serial.println( tx );
+    for ( int i = 0 ; i < 16 ; i++ ) {
+      Serial.print( getField( tx, i, ',' ) );
+      Serial.write( ',' );
+    }
+    Serial.println( getField( tx, 66, ',' ) );
   }
   if ( isLogging ) {
     logFile.print( " TX:" );
@@ -928,7 +946,7 @@ void procData() {
   }
   deSense = 10 * log10( deSense );
   if ( outputFlg ) {
-    displaySpectrum( xtSpectData, 0, 2, 50 );
+    displaySpectrum( xtSpectData, 0, 4, 50 );
     Serial.print( "De-Sense = " ); Serial.print( deSense, 1 );
     Serial.println( " dB" );
   }
